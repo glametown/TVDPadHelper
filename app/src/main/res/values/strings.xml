@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Netflix D-Pad Helper</string>
+    <string name="accessibility_service_description">Allows your projector remote directional D-Pad keys to navigate and click items inside mobile Netflix without using a mouse cursor.</string>
+</resources>

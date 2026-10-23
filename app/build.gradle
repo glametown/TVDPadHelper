@@ -1,0 +1,35 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.raygold.netflixdpad'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.raygold.netflixdpad"
+        minSdk 24
+        targetSdk 32 // Optimized for Android 12.0 (API 31/32) on RAY GOLD Projector
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug // Signed with debug key so it installs directly on the projector
+        }
+        debug {
+            applicationIdSuffix ""
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+}
+
+dependencies {
+    // Pure Android SDK implementation — zero heavy external dependencies!
+}
