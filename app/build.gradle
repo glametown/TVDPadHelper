@@ -16,9 +16,17 @@ android {
 
     signingConfigs {
         debug {
+            // Fixed key shared by every build. CI runners start blank and would otherwise generate a
+            // new random debug key each run; Android refuses to update an installed app that was
+            // signed with a different key, which the projector reports as "failed to parse package".
+            // This is a throwaway debug key (standard android/android credentials), not a secret.
+            storeFile file("debug.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
             // With minSdk 24 AGP signs with v2+ only. Some projector/TV firmware ships a custom
-            // package installer that only understands the classic v1 (JAR) signature and reports
-            // "failed to parse package", so sign with both schemes.
+            // package installer that only understands the classic v1 (JAR) signature, so sign with
+            // both schemes.
             enableV1Signing = true
             enableV2Signing = true
         }
