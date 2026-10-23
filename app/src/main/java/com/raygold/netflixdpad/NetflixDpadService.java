@@ -175,7 +175,7 @@ public class NetflixDpadService extends AccessibilityService {
     }
 
     @Override
-    protected boolean onKeyEvent(KeyEvent event) {
+    public boolean onKeyEvent(KeyEvent event) {
         if (!isNetflixForeground) {
             return super.onKeyEvent(event);
         }
