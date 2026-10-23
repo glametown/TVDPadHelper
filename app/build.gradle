@@ -14,6 +14,16 @@ android {
         versionName "2.0"
     }
 
+    signingConfigs {
+        debug {
+            // With minSdk 24 AGP signs with v2+ only. Some projector/TV firmware ships a custom
+            // package installer that only understands the classic v1 (JAR) signature and reports
+            // "failed to parse package", so sign with both schemes.
+            enableV1Signing = true
+            enableV2Signing = true
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
