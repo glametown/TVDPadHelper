@@ -23,8 +23,6 @@ import android.widget.FrameLayout;
 import android.widget.TextView;
 
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
 import java.util.List;
 
 /**
@@ -37,7 +35,14 @@ import java.util.List;
  */
 public class NetflixDpadService extends AccessibilityService {
 
-    private static final String PREFS_NAME = "NetflixDpadPrefs";
+    public static final String PREFS_NAME = "NetflixDpadPrefs";
+    public static final String KEY_ALLOW_ALL_APPS = "allow_all_apps";
+    /**
+     * Netflix-only by default. Universal mode intercepts the remote in every app (launcher,
+     * Settings, ...), which breaks apps that already handle D-Pad navigation natively.
+     */
+    public static final boolean DEFAULT_ALLOW_ALL_APPS = false;
+    private static final String KEY_SERVICE_PAUSED = "service_paused";
 
     private WindowManager windowManager;
     private FrameLayout overlayRoot;
@@ -45,7 +50,8 @@ public class NetflixDpadService extends AccessibilityService {
     private TextView modeBadgeView;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private boolean isHelperActive = true;
+    // Last app seen in a window-state event (transient system/IME windows excluded).
+    private String lastForegroundPkg = null;
     private boolean isVirtualGridMode = false;
 
     private final Rect currentFocusRect = new Rect();
@@ -131,69 +137,63 @@ public class NetflixDpadService extends AccessibilityService {
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null || event.getPackageName() == null) return;
+        if (event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return;
 
         String pkg = event.getPackageName().toString().toLowerCase();
-        int eventType = event.getEventType();
+        // Our own screens and transient system/IME windows (volume panel, keyboard, notification
+        // shade) say nothing about which app is in front. Treating them as a foreground change used
+        // to switch the helper off until the next Netflix window event.
+        if (pkg.equals(getPackageName().toLowerCase()) || isTransientSystemPackage(pkg)) return;
 
-        if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            if (pkg.equals(getPackageName().toLowerCase())) return;
+        lastForegroundPkg = pkg;
 
-            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-            // Default to true so it works even if the projector uses a modified Netflix package name
-            boolean allowAllApps = prefs.getBoolean("allow_all_apps", true);
-
-            boolean shouldActivate = pkg.contains("netflix") || pkg.contains("mediaclient") || allowAllApps;
-            isHelperActive = shouldActivate;
-            if (!isHelperActive) {
-                hideFocusOverlay();
-            } else if (pkg.contains("netflix") || pkg.contains("mediaclient")) {
-                updateScreenDimensions();
-                showBadgeTemporarily("Netflix D-Pad Active");
-                mainHandler.postDelayed(this::ensureValidFocus, 300);
-            }
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        boolean allowAllApps = prefs.getBoolean(KEY_ALLOW_ALL_APPS, DEFAULT_ALLOW_ALL_APPS);
+        if (!isTargetPackage(pkg, allowAllApps)) {
+            hideFocusOverlay();
+        } else if (isNetflixPackage(pkg)) {
+            updateScreenDimensions();
+            showBadgeTemporarily("Netflix D-Pad Active");
+            mainHandler.postDelayed(this::ensureValidFocus, 300);
         }
+    }
+
+    private static boolean isNetflixPackage(String lowerPkg) {
+        return lowerPkg.contains("netflix") || lowerPkg.contains("mediaclient");
+    }
+
+    private static boolean isTransientSystemPackage(String lowerPkg) {
+        return lowerPkg.startsWith("com.android.systemui") || lowerPkg.contains("inputmethod");
+    }
+
+    private static boolean isTargetPackage(String lowerPkg, boolean allowAllApps) {
+        return allowAllApps || isNetflixPackage(lowerPkg);
+    }
+
+    /** True when the app currently in front is one the helper should drive. */
+    private boolean isTargetAppInForeground(SharedPreferences prefs) {
+        boolean allowAllApps = prefs.getBoolean(KEY_ALLOW_ALL_APPS, DEFAULT_ALLOW_ALL_APPS);
+
+        String pkg = null;
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root != null && root.getPackageName() != null) {
+            pkg = root.getPackageName().toString().toLowerCase();
+        }
+        // Netflix sometimes hides its accessibility tree; fall back to the last window event.
+        if (pkg == null || isTransientSystemPackage(pkg)) {
+            pkg = lastForegroundPkg;
+        }
+        if (pkg == null || pkg.equals(getPackageName().toLowerCase())) return false;
+        return isTargetPackage(pkg, allowAllApps);
     }
 
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        boolean servicePaused = prefs.getBoolean("service_paused", false);
-        if (servicePaused || !isHelperActive) {
-            return super.onKeyEvent(event);
-        }
+        final int keyCode = event.getKeyCode();
 
-        // Check active window package; don't intercept keys when inside our own setup screen
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root != null && root.getPackageName() != null) {
-            String activePkg = root.getPackageName().toString();
-            if (activePkg.equals(getPackageName())) {
-                return super.onKeyEvent(event);
-            }
-            boolean allowAll = prefs.getBoolean("allow_all_apps", true);
-            if (!allowAll && !activePkg.toLowerCase().contains("netflix")) {
-                hideFocusOverlay();
-                return super.onKeyEvent(event);
-            }
-        }
-
-        int keyCode = event.getKeyCode();
-        int action = event.getAction();
-
-        // Press MENU key to switch between Smart Card Focus and Virtual D-Pad Pointer
-        if (keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_PROG_RED) {
-            if (action == KeyEvent.ACTION_DOWN) {
-                isVirtualGridMode = !isVirtualGridMode;
-                if (isVirtualGridMode) {
-                    showBadgeTemporarily("Mode: D-Pad Step Pointer + Auto-Scroll");
-                    updateGridHighlight();
-                } else {
-                    showBadgeTemporarily("Mode: Smart Card Focus");
-                    ensureValidFocus();
-                }
-            }
-            return true;
-        }
-
+        // MENU / red button switches between Smart Card Focus and the Virtual D-Pad Pointer.
+        final boolean isModeKey = keyCode == KeyEvent.KEYCODE_MENU
+                || keyCode == KeyEvent.KEYCODE_PROG_RED;
         boolean isDpadKey = keyCode == KeyEvent.KEYCODE_DPAD_UP
                 || keyCode == KeyEvent.KEYCODE_DPAD_DOWN
                 || keyCode == KeyEvent.KEYCODE_DPAD_LEFT
@@ -203,17 +203,48 @@ public class NetflixDpadService extends AccessibilityService {
                 || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
                 || keyCode == KeyEvent.KEYCODE_BUTTON_A;
 
-        if (!isDpadKey) {
+        // Leave every other key (volume, back, home, ...) alone, with no accessibility IPC at all.
+        if (!isModeKey && !isDpadKey) {
             return super.onKeyEvent(event);
         }
 
-        if (action != KeyEvent.ACTION_DOWN) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        if (prefs.getBoolean(KEY_SERVICE_PAUSED, false) || !isTargetAppInForeground(prefs)) {
+            return super.onKeyEvent(event);
+        }
+
+        if (event.getAction() != KeyEvent.ACTION_DOWN) {
             return true;
         }
 
+        // Walking Netflix's node tree can be slow on a projector SoC, and the system only waits a
+        // short while for onKeyEvent to answer before delivering the key to the app anyway. Claim
+        // the key right away and do the work on the next loop iteration.
+        mainHandler.post(() -> {
+            if (isModeKey) {
+                toggleMode();
+            } else {
+                handleDpadKey(keyCode);
+            }
+        });
+        return true;
+    }
+
+    private void toggleMode() {
+        isVirtualGridMode = !isVirtualGridMode;
+        if (isVirtualGridMode) {
+            showBadgeTemporarily("Mode: D-Pad Step Pointer + Auto-Scroll");
+            updateGridHighlight();
+        } else {
+            showBadgeTemporarily("Mode: Smart Card Focus");
+            ensureValidFocus();
+        }
+    }
+
+    private void handleDpadKey(int keyCode) {
         if (isVirtualGridMode) {
             handleVirtualGridKey(keyCode);
-            return true;
+            return;
         }
 
         switch (keyCode) {
@@ -222,17 +253,12 @@ public class NetflixDpadService extends AccessibilityService {
             case KeyEvent.KEYCODE_DPAD_LEFT:
             case KeyEvent.KEYCODE_DPAD_RIGHT:
                 navigateDirection(keyCode);
-                return true;
-
-            case KeyEvent.KEYCODE_DPAD_CENTER:
-            case KeyEvent.KEYCODE_ENTER:
-            case KeyEvent.KEYCODE_NUMPAD_ENTER:
-            case KeyEvent.KEYCODE_BUTTON_A:
+                break;
+            default:
+                // DPAD_CENTER / ENTER / NUMPAD_ENTER / BUTTON_A
                 performSelectAction();
-                return true;
+                break;
         }
-
-        return super.onKeyEvent(event);
     }
 
     private void navigateDirection(int keyCode) {
@@ -244,7 +270,11 @@ public class NetflixDpadService extends AccessibilityService {
             return;
         }
 
-        if (currentFocusRect.isEmpty() || !isValidScreenRect(currentFocusRect)) {
+        refreshCurrentFocus();
+
+        // Only an empty rect means "no focus yet". A card that is partly scrolled off-screen is
+        // still a valid starting point (it used to reset focus to the top-left item).
+        if (currentFocusRect.isEmpty()) {
             selectInitialNode(clickables);
             return;
         }
@@ -265,6 +295,20 @@ public class NetflixDpadService extends AccessibilityService {
                     }
                 }
             });
+        }
+    }
+
+    /**
+     * Netflix scrolls and recycles views on its own, so the remembered node may have moved or be
+     * gone. Re-read its bounds; if it is gone, keep the last known rect as the starting point.
+     */
+    private void refreshCurrentFocus() {
+        if (currentFocusedNode == null) return;
+        if (currentFocusedNode.refresh()) {
+            currentFocusedNode.getBoundsInScreen(currentFocusRect);
+            drawFocusRect(currentFocusRect);
+        } else {
+            currentFocusedNode = null;
         }
     }
 
@@ -354,20 +398,27 @@ public class NetflixDpadService extends AccessibilityService {
     }
 
     private void selectInitialNode(List<AccessibilityNodeInfo> clickables) {
-        Collections.sort(clickables, new Comparator<AccessibilityNodeInfo>() {
-            @Override
-            public int compare(AccessibilityNodeInfo a, AccessibilityNodeInfo b) {
-                Rect ra = new Rect();
-                Rect rb = new Rect();
-                a.getBoundsInScreen(ra);
-                b.getBoundsInScreen(rb);
-                if (Math.abs(ra.top - rb.top) > 40) {
-                    return Integer.compare(ra.top, rb.top);
-                }
-                return Integer.compare(ra.left, rb.left);
+        // Top-most row first, then the left-most item in that row. A linear scan replaces the old
+        // tolerance-based comparator: it was not transitive, so Collections.sort could throw
+        // "Comparison method violates its general contract!" on large lists and kill the service.
+        Rect r = new Rect();
+        int minTop = Integer.MAX_VALUE;
+        for (AccessibilityNodeInfo node : clickables) {
+            node.getBoundsInScreen(r);
+            minTop = Math.min(minTop, r.top);
+        }
+        AccessibilityNodeInfo first = null;
+        int minLeft = Integer.MAX_VALUE;
+        for (AccessibilityNodeInfo node : clickables) {
+            node.getBoundsInScreen(r);
+            if (r.top - minTop <= 40 && r.left < minLeft) {
+                minLeft = r.left;
+                first = node;
             }
-        });
-        setFocusedNode(clickables.get(0));
+        }
+        if (first != null) {
+            setFocusedNode(first);
+        }
     }
 
     private void selectNearestNodeToCenter(List<AccessibilityNodeInfo> nodes, int targetX, int targetY) {
@@ -475,7 +526,7 @@ public class NetflixDpadService extends AccessibilityService {
         Rect bounds = new Rect();
         node.getBoundsInScreen(bounds);
 
-        if (isValidScreenRect(bounds)) {
+        if (isMostlyOnScreen(bounds)) {
             boolean actionable = node.isClickable() || node.isFocusable();
             if (actionable && bounds.width() >= 32 && bounds.height() >= 32
                     && bounds.width() < screenWidth * 0.95f) {
@@ -492,12 +543,16 @@ public class NetflixDpadService extends AccessibilityService {
         }
     }
 
-    private boolean isValidScreenRect(Rect r) {
+    /**
+     * Netflix carousels keep cards that are partly off the edge of the screen. Accept any node
+     * with a reasonable visible area instead of requiring it to sit fully inside the screen,
+     * otherwise those cards can never be reached with the remote.
+     */
+    private boolean isMostlyOnScreen(Rect r) {
         if (r == null || r.isEmpty()) return false;
-        return r.left >= 0 && r.top >= 0
-                && r.right <= screenWidth + 20
-                && r.bottom <= screenHeight + 20
-                && r.width() > 20 && r.height() > 20;
+        int visibleWidth = Math.min(r.right, screenWidth) - Math.max(r.left, 0);
+        int visibleHeight = Math.min(r.bottom, screenHeight) - Math.max(r.top, 0);
+        return visibleWidth >= 32 && visibleHeight >= 32;
     }
 
     private void setFocusedNode(AccessibilityNodeInfo node) {

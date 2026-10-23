@@ -1,6 +1,7 @@
 package com.raygold.netflixdpad;
 
 import android.app.Activity;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
@@ -18,7 +19,7 @@ import android.widget.Toast;
 
 public class MainActivity extends Activity {
 
-    private static final String PREFS_NAME = "NetflixDpadPrefs";
+    private static final String PREFS_NAME = NetflixDpadService.PREFS_NAME;
     private TextView statusBanner;
     private TextView keyTestBanner;
     private Button toggleScopeBtn;
@@ -76,11 +77,13 @@ public class MainActivity extends Activity {
 
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         toggleScopeBtn = createTvButton("");
-        updateScopeButtonLabel(prefs.getBoolean("allow_all_apps", true));
+        updateScopeButtonLabel(prefs.getBoolean(
+                NetflixDpadService.KEY_ALLOW_ALL_APPS, NetflixDpadService.DEFAULT_ALLOW_ALL_APPS));
         toggleScopeBtn.setOnClickListener(v -> {
-            boolean current = prefs.getBoolean("allow_all_apps", true);
+            boolean current = prefs.getBoolean(
+                    NetflixDpadService.KEY_ALLOW_ALL_APPS, NetflixDpadService.DEFAULT_ALLOW_ALL_APPS);
             boolean next = !current;
-            prefs.edit().putBoolean("allow_all_apps", next).apply();
+            prefs.edit().putBoolean(NetflixDpadService.KEY_ALLOW_ALL_APPS, next).apply();
             updateScopeButtonLabel(next);
         });
         root.addView(toggleScopeBtn);
@@ -113,9 +116,9 @@ public class MainActivity extends Activity {
 
     private void updateScopeButtonLabel(boolean allowAll) {
         if (allowAll) {
-            toggleScopeBtn.setText("3. Active Mode: Universal (Works in all Netflix versions & apps)");
+            toggleScopeBtn.setText("3. Active Mode: Universal (remote keys intercepted in ALL apps)");
         } else {
-            toggleScopeBtn.setText("3. Active Mode: Strict (com.netflix.mediaclient only)");
+            toggleScopeBtn.setText("3. Active Mode: Netflix only (recommended)");
         }
     }
 
@@ -177,15 +180,16 @@ public class MainActivity extends Activity {
     }
 
     private boolean isAccessibilityServiceEnabled() {
-        String expectedComponentName = getPackageName() + "/" + NetflixDpadService.class.getCanonicalName();
+        ComponentName expected = new ComponentName(this, NetflixDpadService.class);
         String enabledServices = Settings.Secure.getString(
                 getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
         if (TextUtils.isEmpty(enabledServices)) return false;
         TextUtils.SimpleStringSplitter splitter = new TextUtils.SimpleStringSplitter(':');
         splitter.setString(enabledServices);
         while (splitter.hasNext()) {
-            String component = splitter.next();
-            if (component.equalsIgnoreCase(expectedComponentName)) {
+            // Settings may store the short ("pkg/.Class") or full ("pkg/pkg.Class") form.
+            ComponentName enabled = ComponentName.unflattenFromString(splitter.next());
+            if (expected.equals(enabled)) {
                 return true;
             }
         }

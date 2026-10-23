@@ -6,7 +6,8 @@ This lightweight Android app solves the mouse-cursor problem in the mobile Netfl
 - **Smart Red Focus Frame:** Draws a high-visibility Netflix-red border around movie thumbnails, rows, profiles, and buttons so you can see exactly what is selected across the room.
 - **True Directional Navigation (Up / Down / Left / Right):** Jumps between movie cards in 2D using your projector remote's directional keys.
 - **Auto-Scrolling at Edges:** Automatically injects smooth swipe gestures when you press Down/Up/Left/Right at the edge of the screen to scroll through rows and categories without needing an air-mouse drag.
-- **Video Player Shortcuts:** When a movie or episode is playing full-screen, pressing **Left / Right** skips `-10s` / `+10s`, and pressing **OK / Enter** wakes the player controls and toggles Play/Pause.
+- **Netflix-only by default:** The helper only intercepts remote keys while Netflix is in front, so your launcher and Settings keep their native navigation. Button 3 in the app switches to Universal mode (all apps) if you need it.
+- **Full-screen playback:** Dedicated player shortcuts (skip +/-10s, play/pause) are not implemented yet. While a video plays, the Virtual Pointer fallback is used.
 - **Mode Switcher (`Menu` key):** Press `Menu` on your remote at any time to switch between **Smart Card Focus** and **Virtual Grid Pointer** mode.
 
 ## How to Get the `.apk` File (2 Easy Options)
