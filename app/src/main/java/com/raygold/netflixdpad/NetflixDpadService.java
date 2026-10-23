@@ -18,6 +18,7 @@ import android.view.View;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 
@@ -29,18 +30,13 @@ import java.util.List;
 /**
  * Custom D-Pad Accessibility Helper for Mobile Netflix on Android 12 Projectors (RAY GOLD).
  *
- * How it works:
- * 1. Detects when Netflix (com.netflix.mediaclient) is in the foreground.
- * 2. Intercepts remote D-Pad keys (UP, DOWN, LEFT, RIGHT, DPAD_CENTER / ENTER).
- * 3. Scans the screen for clickable UI items (movie cards, tabs, Play/Pause, Skip Intro, profiles).
- * 4. Draws a high-visibility Netflix-Red focus border around the active item on the projector screen.
- * 5. Moves focus spatially in 2D when D-Pad arrows are pressed. When reaching the edge of the screen,
- *    automatically injects a smooth swipe gesture to scroll rows vertically or horizontally.
- * 6. Simulates a tap/click when the remote's OK/Center button is pressed.
+ * Upgraded v2:
+ * - Works across ALL windows and custom Netflix flavors (even if WINDOW_STATE_CHANGED is suppressed).
+ * - Includes both Smart Card Focus Mode and Virtual D-Pad Cursor Mode (with auto-edge scrolling).
+ * - Automatically falls back to Virtual D-Pad Cursor whenever Netflix hides its Accessibility tree.
  */
 public class NetflixDpadService extends AccessibilityService {
 
-    private static final String NETFLIX_PACKAGE = "com.netflix.mediaclient";
     private static final String PREFS_NAME = "NetflixDpadPrefs";
 
     private WindowManager windowManager;
@@ -49,8 +45,8 @@ public class NetflixDpadService extends AccessibilityService {
     private TextView modeBadgeView;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private boolean isNetflixForeground = false;
-    private boolean isVirtualGridMode = false; // Toggleable fallback mode for custom surfaces/player
+    private boolean isHelperActive = true;
+    private boolean isVirtualGridMode = false;
 
     private final Rect currentFocusRect = new Rect();
     private AccessibilityNodeInfo currentFocusedNode = null;
@@ -58,7 +54,7 @@ public class NetflixDpadService extends AccessibilityService {
     private int screenWidth = 1920;
     private int screenHeight = 1080;
 
-    // Virtual Grid cursor position (used when video player controls are hidden or in Grid Mode)
+    // Virtual D-Pad Pointer coordinates
     private int gridX = 960;
     private int gridY = 540;
 
@@ -68,6 +64,7 @@ public class NetflixDpadService extends AccessibilityService {
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
         updateScreenDimensions();
         createFocusOverlay();
+        showBadgeTemporarily("Netflix D-Pad Helper Ready");
     }
 
     private void updateScreenDimensions() {
@@ -84,11 +81,10 @@ public class NetflixDpadService extends AccessibilityService {
     private void createFocusOverlay() {
         overlayRoot = new FrameLayout(this);
 
-        // Red glowing focus border around the currently selected Netflix item
         focusHighlightBox = new View(this);
         GradientDrawable border = new GradientDrawable();
-        border.setColor(Color.argb(35, 229, 9, 20)); // Subtle translucent red fill
-        border.setStroke(6, Color.rgb(229, 9, 20));  // Bright Netflix Red border (#E50914)
+        border.setColor(Color.argb(45, 229, 9, 20));
+        border.setStroke(6, Color.rgb(229, 9, 20));
         border.setCornerRadius(14f);
         focusHighlightBox.setBackground(border);
         focusHighlightBox.setVisibility(View.GONE);
@@ -96,13 +92,12 @@ public class NetflixDpadService extends AccessibilityService {
         FrameLayout.LayoutParams boxParams = new FrameLayout.LayoutParams(0, 0);
         overlayRoot.addView(focusHighlightBox, boxParams);
 
-        // Subtle status pill in top-right corner when switching modes
         modeBadgeView = new TextView(this);
         modeBadgeView.setTextColor(Color.WHITE);
-        modeBadgeView.setTextSize(12f);
-        modeBadgeView.setPadding(20, 8, 20, 8);
+        modeBadgeView.setTextSize(13f);
+        modeBadgeView.setPadding(24, 10, 24, 10);
         GradientDrawable badgeBg = new GradientDrawable();
-        badgeBg.setColor(Color.argb(200, 20, 20, 20));
+        badgeBg.setColor(Color.argb(210, 20, 20, 20));
         badgeBg.setStroke(2, Color.rgb(229, 9, 20));
         badgeBg.setCornerRadius(20f);
         modeBadgeView.setBackground(badgeBg);
@@ -137,58 +132,59 @@ public class NetflixDpadService extends AccessibilityService {
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null || event.getPackageName() == null) return;
 
-        String pkg = event.getPackageName().toString();
+        String pkg = event.getPackageName().toString().toLowerCase();
         int eventType = event.getEventType();
 
         if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            // Ignore our own overlay window events
-            if (pkg.equals(getPackageName())) return;
+            if (pkg.equals(getPackageName().toLowerCase())) return;
 
             SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-            boolean allowAllApps = prefs.getBoolean("allow_all_apps", false);
+            // Default to true so it works even if the projector uses a modified Netflix package name
+            boolean allowAllApps = prefs.getBoolean("allow_all_apps", true);
 
-            boolean nowNetflix = pkg.contains("netflix") || allowAllApps;
-            if (nowNetflix != isNetflixForeground) {
-                isNetflixForeground = nowNetflix;
-                if (!isNetflixForeground) {
-                    hideFocusOverlay();
-                } else {
-                    updateScreenDimensions();
-                    showBadgeTemporarily("D-Pad Helper Active (Smart Focus)");
-                    mainHandler.postDelayed(this::ensureValidFocus, 350);
-                }
-            }
-        } else if (isNetflixForeground &&
-                (eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
-                        || eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED)) {
-            // Refresh highlight coordinates if the focused node moved
-            if (!isVirtualGridMode && currentFocusedNode != null) {
-                currentFocusedNode.refresh();
-                Rect updated = new Rect();
-                currentFocusedNode.getBoundsInScreen(updated);
-                if (isValidScreenRect(updated)) {
-                    currentFocusRect.set(updated);
-                    drawFocusRect(currentFocusRect);
-                }
+            boolean shouldActivate = pkg.contains("netflix") || pkg.contains("mediaclient") || allowAllApps;
+            isHelperActive = shouldActivate;
+            if (!isHelperActive) {
+                hideFocusOverlay();
+            } else if (pkg.contains("netflix") || pkg.contains("mediaclient")) {
+                updateScreenDimensions();
+                showBadgeTemporarily("Netflix D-Pad Active");
+                mainHandler.postDelayed(this::ensureValidFocus, 300);
             }
         }
     }
 
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
-        if (!isNetflixForeground) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        boolean servicePaused = prefs.getBoolean("service_paused", false);
+        if (servicePaused || !isHelperActive) {
             return super.onKeyEvent(event);
+        }
+
+        // Check active window package; don't intercept keys when inside our own setup screen
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root != null && root.getPackageName() != null) {
+            String activePkg = root.getPackageName().toString();
+            if (activePkg.equals(getPackageName())) {
+                return super.onKeyEvent(event);
+            }
+            boolean allowAll = prefs.getBoolean("allow_all_apps", true);
+            if (!allowAll && !activePkg.toLowerCase().contains("netflix")) {
+                hideFocusOverlay();
+                return super.onKeyEvent(event);
+            }
         }
 
         int keyCode = event.getKeyCode();
         int action = event.getAction();
 
-        // Allow long-press MENU or Channel/Page keys to toggle between Smart Focus and Virtual Grid Pointer
+        // Press MENU key to switch between Smart Card Focus and Virtual D-Pad Pointer
         if (keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_PROG_RED) {
             if (action == KeyEvent.ACTION_DOWN) {
                 isVirtualGridMode = !isVirtualGridMode;
                 if (isVirtualGridMode) {
-                    showBadgeTemporarily("Mode: Virtual D-Pad Pointer (Video / Free Tap)");
+                    showBadgeTemporarily("Mode: D-Pad Step Pointer + Auto-Scroll");
                     updateGridHighlight();
                 } else {
                     showBadgeTemporarily("Mode: Smart Card Focus");
@@ -204,13 +200,13 @@ public class NetflixDpadService extends AccessibilityService {
                 || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
                 || keyCode == KeyEvent.KEYCODE_DPAD_CENTER
                 || keyCode == KeyEvent.KEYCODE_ENTER
-                || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER;
+                || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
+                || keyCode == KeyEvent.KEYCODE_BUTTON_A;
 
         if (!isDpadKey) {
             return super.onKeyEvent(event);
         }
 
-        // Consume both ACTION_DOWN and ACTION_UP so Netflix doesn't get confused by raw key events
         if (action != KeyEvent.ACTION_DOWN) {
             return true;
         }
@@ -231,6 +227,7 @@ public class NetflixDpadService extends AccessibilityService {
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
+            case KeyEvent.KEYCODE_BUTTON_A:
                 performSelectAction();
                 return true;
         }
@@ -238,18 +235,12 @@ public class NetflixDpadService extends AccessibilityService {
         return super.onKeyEvent(event);
     }
 
-    /**
-     * Handles directional navigation in Smart UI Node Mode.
-     * Finds the nearest clickable item in the requested direction; if at the edge of the screen,
-     * scrolls Netflix via a touch swipe gesture and then re-scans.
-     */
     private void navigateDirection(int keyCode) {
         List<AccessibilityNodeInfo> clickables = collectClickableNodes();
 
-        // If no clickable nodes exist (e.g. fullscreen video playing with hidden HUD),
-        // wake up the HUD or perform direct video actions:
+        // If Netflix's current screen doesn't expose clickable nodes, automatically use the Virtual Step Pointer!
         if (clickables.isEmpty()) {
-            handleVideoPlayerFallback(keyCode);
+            handleVirtualGridKey(keyCode);
             return;
         }
 
@@ -262,7 +253,6 @@ public class NetflixDpadService extends AccessibilityService {
         if (bestCandidate != null) {
             setFocusedNode(bestCandidate);
         } else {
-            // No clickable card further in that direction -> auto-scroll the screen!
             scrollScreenForDirection(keyCode, () -> {
                 List<AccessibilityNodeInfo> updatedNodes = collectClickableNodes();
                 if (!updatedNodes.isEmpty()) {
@@ -279,7 +269,7 @@ public class NetflixDpadService extends AccessibilityService {
     }
 
     private void performSelectAction() {
-        if (currentFocusedNode != null) {
+        if (!isVirtualGridMode && currentFocusedNode != null) {
             currentFocusedNode.refresh();
             boolean clicked = currentFocusedNode.performAction(AccessibilityNodeInfo.ACTION_CLICK);
             if (clicked) {
@@ -292,51 +282,34 @@ public class NetflixDpadService extends AccessibilityService {
             flashFocusBox();
             dispatchTapGesture(currentFocusRect.centerX(), currentFocusRect.centerY());
         } else {
-            // Wake video controls by tapping center of screen
-            dispatchTapGesture(screenWidth / 2, screenHeight / 2);
-            mainHandler.postDelayed(this::ensureValidFocus, 400);
-        }
-    }
-
-    /**
-     * When watching a movie full-screen and OSD controls are hidden:
-     * - Left / Right double-taps left or right side to skip -10s / +10s (standard mobile Netflix gesture)
-     * - Up / Down / OK taps the screen center to reveal the OSD controls and focuses Play/Pause
-     */
-    private void handleVideoPlayerFallback(int keyCode) {
-        if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
-            showBadgeTemporarily("Rewind 10s");
-            int leftX = (int) (screenWidth * 0.22f);
-            int midY = screenHeight / 2;
-            dispatchDoubleTapGesture(leftX, midY);
-        } else if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
-            showBadgeTemporarily("Forward 10s");
-            int rightX = (int) (screenWidth * 0.78f);
-            int midY = screenHeight / 2;
-            dispatchDoubleTapGesture(rightX, midY);
-        } else {
-            // Tap center to bring up Netflix player overlay controls
-            dispatchTapGesture(screenWidth / 2, screenHeight / 2);
-            mainHandler.postDelayed(this::ensureValidFocus, 400);
+            flashFocusBox();
+            dispatchTapGesture(gridX, gridY);
         }
     }
 
     private void handleVirtualGridKey(int keyCode) {
-        int stepX = Math.max(80, screenWidth / 14);
-        int stepY = Math.max(70, screenHeight / 10);
+        int stepX = Math.max(90, screenWidth / 12);
+        int stepY = Math.max(80, screenHeight / 9);
 
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_LEFT:
-                gridX = Math.max(40, gridX - stepX);
-                updateGridHighlight();
+                if (gridX <= stepX + 40) {
+                    scrollScreenForDirection(KeyEvent.KEYCODE_DPAD_LEFT, null);
+                } else {
+                    gridX = Math.max(40, gridX - stepX);
+                    updateGridHighlight();
+                }
                 break;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                gridX = Math.min(screenWidth - 40, gridX + stepX);
-                updateGridHighlight();
+                if (gridX >= screenWidth - stepX - 40) {
+                    scrollScreenForDirection(KeyEvent.KEYCODE_DPAD_RIGHT, null);
+                } else {
+                    gridX = Math.min(screenWidth - 40, gridX + stepX);
+                    updateGridHighlight();
+                }
                 break;
             case KeyEvent.KEYCODE_DPAD_UP:
                 if (gridY <= stepY + 40) {
-                    // At top edge -> scroll up
                     scrollScreenForDirection(KeyEvent.KEYCODE_DPAD_UP, null);
                 } else {
                     gridY -= stepY;
@@ -345,7 +318,6 @@ public class NetflixDpadService extends AccessibilityService {
                 break;
             case KeyEvent.KEYCODE_DPAD_DOWN:
                 if (gridY >= screenHeight - stepY - 40) {
-                    // At bottom edge -> scroll down
                     scrollScreenForDirection(KeyEvent.KEYCODE_DPAD_DOWN, null);
                 } else {
                     gridY += stepY;
@@ -355,6 +327,7 @@ public class NetflixDpadService extends AccessibilityService {
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
+            case KeyEvent.KEYCODE_BUTTON_A:
                 flashFocusBox();
                 dispatchTapGesture(gridX, gridY);
                 break;
@@ -362,21 +335,25 @@ public class NetflixDpadService extends AccessibilityService {
     }
 
     private void updateGridHighlight() {
-        int size = 56;
+        int size = 64;
         currentFocusRect.set(gridX - size / 2, gridY - size / 2, gridX + size / 2, gridY + size / 2);
         drawFocusRect(currentFocusRect);
     }
 
     private void ensureValidFocus() {
-        if (!isNetflixForeground || isVirtualGridMode) return;
+        if (isVirtualGridMode) {
+            updateGridHighlight();
+            return;
+        }
         List<AccessibilityNodeInfo> clickables = collectClickableNodes();
         if (!clickables.isEmpty()) {
             selectInitialNode(clickables);
+        } else {
+            updateGridHighlight();
         }
     }
 
     private void selectInitialNode(List<AccessibilityNodeInfo> clickables) {
-        // Sort top-to-bottom, left-to-right and pick the first prominent card/button
         Collections.sort(clickables, new Comparator<AccessibilityNodeInfo>() {
             @Override
             public int compare(AccessibilityNodeInfo a, AccessibilityNodeInfo b) {
@@ -399,9 +376,7 @@ public class NetflixDpadService extends AccessibilityService {
         for (AccessibilityNodeInfo node : nodes) {
             Rect r = new Rect();
             node.getBoundsInScreen(r);
-            double dx = r.centerX() - targetX;
-            double dy = r.centerY() - targetY;
-            double dist = Math.hypot(dx, dy);
+            double dist = Math.hypot(r.centerX() - targetX, r.centerY() - targetY);
             if (dist < bestDist) {
                 bestDist = dist;
                 best = node;
@@ -425,7 +400,6 @@ public class NetflixDpadService extends AccessibilityService {
             Rect r = new Rect();
             node.getBoundsInScreen(r);
 
-            // Skip the currently focused rect itself
             if (Math.abs(r.centerX() - fromX) < 12 && Math.abs(r.centerY() - fromY) < 12) {
                 continue;
             }
@@ -462,7 +436,6 @@ public class NetflixDpadService extends AccessibilityService {
 
             if (!isInDirection) continue;
 
-            // Penalize large cross-axis jumps so Left/Right stays in the same horizontal movie row
             double orthogonalWeight = (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)
                     ? 3.2 : 1.8;
             double score = primaryDist + (orthogonalDist * orthogonalWeight);
@@ -479,8 +452,20 @@ public class NetflixDpadService extends AccessibilityService {
     private List<AccessibilityNodeInfo> collectClickableNodes() {
         List<AccessibilityNodeInfo> result = new ArrayList<>();
         AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) return result;
-        traverseNodeTree(root, result);
+        if (root != null) {
+            traverseNodeTree(root, result);
+        }
+        if (result.isEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            List<AccessibilityWindowInfo> windows = getWindows();
+            if (windows != null) {
+                for (AccessibilityWindowInfo window : windows) {
+                    AccessibilityNodeInfo wRoot = window.getRoot();
+                    if (wRoot != null) {
+                        traverseNodeTree(wRoot, result);
+                    }
+                }
+            }
+        }
         return result;
     }
 
@@ -492,7 +477,7 @@ public class NetflixDpadService extends AccessibilityService {
 
         if (isValidScreenRect(bounds)) {
             boolean actionable = node.isClickable() || node.isFocusable();
-            if (actionable && bounds.width() >= 36 && bounds.height() >= 36
+            if (actionable && bounds.width() >= 32 && bounds.height() >= 32
                     && bounds.width() < screenWidth * 0.95f) {
                 outList.add(node);
             }
@@ -540,7 +525,7 @@ public class NetflixDpadService extends AccessibilityService {
     private void flashFocusBox() {
         mainHandler.post(() -> {
             if (focusHighlightBox == null) return;
-            focusHighlightBox.setAlpha(0.3f);
+            focusHighlightBox.setAlpha(0.25f);
             focusHighlightBox.animate().alpha(1.0f).setDuration(180).start();
         });
     }
@@ -584,15 +569,10 @@ public class NetflixDpadService extends AccessibilityService {
         tapPath.moveTo(clampedX, clampedY);
 
         GestureDescription.StrokeDescription stroke =
-                new GestureDescription.StrokeDescription(tapPath, 0, 60);
+                new GestureDescription.StrokeDescription(tapPath, 0, 65);
         GestureDescription.Builder builder = new GestureDescription.Builder();
         builder.addStroke(stroke);
         dispatchGesture(builder.build(), null, null);
-    }
-
-    private void dispatchDoubleTapGesture(int x, int y) {
-        dispatchTapGesture(x, y);
-        mainHandler.postDelayed(() -> dispatchTapGesture(x, y), 140);
     }
 
     private void scrollScreenForDirection(int keyCode, Runnable onComplete) {
@@ -603,7 +583,6 @@ public class NetflixDpadService extends AccessibilityService {
         int endX = startX;
         int endY = startY;
 
-        // If we have a focused card inside a horizontal row, start the horizontal swipe at that row's Y
         if (!currentFocusRect.isEmpty()) {
             startY = Math.max(150, Math.min(screenHeight - 150, currentFocusRect.centerY()));
             endY = startY;
@@ -611,22 +590,18 @@ public class NetflixDpadService extends AccessibilityService {
 
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_DOWN:
-                // Swipe up to scroll content down
                 startY = (int) (screenHeight * 0.72f);
                 endY = (int) (screenHeight * 0.28f);
                 break;
             case KeyEvent.KEYCODE_DPAD_UP:
-                // Swipe down to scroll content up
                 startY = (int) (screenHeight * 0.28f);
                 endY = (int) (screenHeight * 0.72f);
                 break;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                // Swipe left on current row to reveal items to the right
                 startX = (int) (screenWidth * 0.78f);
                 endX = (int) (screenWidth * 0.22f);
                 break;
             case KeyEvent.KEYCODE_DPAD_LEFT:
-                // Swipe right on current row to reveal items to the left
                 startX = (int) (screenWidth * 0.22f);
                 endX = (int) (screenWidth * 0.78f);
                 break;
