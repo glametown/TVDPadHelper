@@ -155,7 +155,7 @@ public class NetflixDpadService extends AccessibilityService {
     }
 
     @Override
-    protected boolean onKeyEvent(KeyEvent event) {
+    public boolean onKeyEvent(KeyEvent event) {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         boolean servicePaused = prefs.getBoolean("service_paused", false);
         if (servicePaused || !isHelperActive) {
