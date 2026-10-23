@@ -47,18 +47,7 @@ public class MainActivity extends Activity {
         root.addView(statusBanner);
 
         Button enableBtn = createTvButton("1. Open Accessibility Settings (Turn ON 'Netflix D-Pad Helper')");
-        enableBtn.setOnClickListener(v -> {
-            try {
-                Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                startActivity(intent);
-            } catch (Exception e) {
-                try {
-                    startActivity(new Intent(Settings.ACTION_SETTINGS));
-                } catch (Exception ignored) {
-                }
-            }
-        });
+        enableBtn.setOnClickListener(v -> openAccessibilitySettings());
         root.addView(enableBtn);
 
         Button launchNetflixBtn = createTvButton("2. Launch Netflix Now");
@@ -112,6 +101,37 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         updateServiceStatus();
+    }
+
+    /**
+     * Projector firmware often lacks the standard accessibility settings screen, and the old code
+     * swallowed the failure so the button looked dead. Try several entry points and always tell
+     * the user what happened.
+     */
+    private void openAccessibilitySettings() {
+        Toast.makeText(this, "Opening Accessibility settings...", Toast.LENGTH_SHORT).show();
+
+        Intent[] attempts = new Intent[] {
+                new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS),
+                new Intent().setComponent(new ComponentName("com.android.settings",
+                        "com.android.settings.accessibility.AccessibilitySettings")),
+                new Intent().setComponent(new ComponentName("com.android.settings",
+                        "com.android.settings.Settings$AccessibilitySettingsActivity")),
+                new Intent(Settings.ACTION_SETTINGS),
+        };
+        for (Intent intent : attempts) {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            try {
+                startActivity(intent);
+                return;
+            } catch (Exception ignored) {
+                // Try the next entry point.
+            }
+        }
+        Toast.makeText(this,
+                "Could not open Settings. Open Settings > Accessibility on the projector and turn on "
+                        + "'Netflix D-Pad Helper' manually.",
+                Toast.LENGTH_LONG).show();
     }
 
     private void updateScopeButtonLabel(boolean allowAll) {
@@ -171,7 +191,8 @@ public class MainActivity extends Activity {
             bannerBg.setColor(Color.parseColor("#112A18"));
             bannerBg.setStroke(2, Color.parseColor("#46D369"));
         } else {
-            statusBanner.setText("STATUS: NOT ENABLED — Click Button 1 below to enable 'Netflix D-Pad Helper' in Accessibility Settings.");
+            statusBanner.setText("STATUS: NOT ENABLED — Turn on 'Netflix D-Pad Helper' under Settings > Accessibility "
+                    + "(Button 1 tries to open it; if nothing opens, go there manually).");
             statusBanner.setTextColor(Color.parseColor("#FFA00A"));
             bannerBg.setColor(Color.parseColor("#2A1F11"));
             bannerBg.setStroke(2, Color.parseColor("#FFA00A"));
